@@ -19,7 +19,9 @@ from firefox_driver_logged_in import create_logged_in_firefox
 LISTING_CONTAINER_CSS = 'div[data-qa-locator="general-products"]'
 LISTING_CARD_CSS = 'div.Bm3ON[data-qa-locator="product-item"][data-tracking="product-card"]'
 
+
 STAR_FILLED_TOKEN = "TB19ZvE"  # token inside filled-star image URL per Notion example
+PAGELOAD_TIMEOUT = 25  # keep navigation snappy; we rely on CSS readiness instead
 
 
 def _rand_sleep(a=0.7, b=1.8):
@@ -81,6 +83,7 @@ def safe_get(driver, url: str, ready_css: Optional[str] = None, tries: int = 3, 
     successful (ready_css present or no ready_css specified), else False.
     """
     for attempt in range(1, tries + 1):
+        driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
         try:
             driver.get(url)
         except TimeoutException:
@@ -101,6 +104,34 @@ def safe_get(driver, url: str, ready_css: Optional[str] = None, tries: int = 3, 
                 return False
             time.sleep(min(2 * attempt, 4))
     return False
+def open_reviews_section(driver) -> bool:
+    """
+    Ensure the reviews module is rendered by clicking the summary link and/or scrolling it into view.
+    Returns True if the reviews container becomes present, else False.
+    """
+    # 1) Try clicking the summary link if present (it usually anchors to the reviews section)
+    with suppress(Exception):
+        link = driver.find_element(By.CSS_SELECTOR, 'a.pdp-review-summary__link')
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link)
+        _rand_sleep(0.2, 0.5)
+        driver.execute_script("arguments[0].click();", link)
+        _rand_sleep(0.6, 1.0)
+    # 2) Progressive scroll down to trigger lazy-load
+    for _ in range(8):
+        try:
+            wait_css(driver, "div.mod-reviews", timeout=2)
+            return True
+        except TimeoutException:
+            driver.execute_script("window.scrollBy(0, Math.max(400, window.innerHeight*0.8));")
+            _rand_sleep(0.2, 0.5)
+    # 3) Fallback: jump to bottom and check again
+    with suppress(Exception):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    try:
+        wait_css(driver, "div.mod-reviews", timeout=3)
+        return True
+    except TimeoutException:
+        return False
 
 
 def maybe_close_popups(driver):
@@ -328,10 +359,12 @@ def iterate_all_reviews(driver) -> List[Dict]:
     Returns list of dicts per review.
     """
     reviews: List[Dict] = []
+    if not open_reviews_section(driver):
+        return reviews  # reviews UI not present / no written reviews
     try:
-        reviews_root = wait_css(driver, "div.mod-reviews", timeout=10)
+        reviews_root = wait_css(driver, "div.mod-reviews", timeout=12)
     except TimeoutException:
-        return reviews  # no visible reviews section
+        return reviews
 
     def extract_page_items():
         items = reviews_root.find_elements(By.CSS_SELECTOR, "div.item")
@@ -420,7 +453,11 @@ def iterate_all_reviews(driver) -> List[Dict]:
                 "button.next-btn.next-btn-normal.next-btn-medium.next-pagination-item.next",
             )
         except NoSuchElementException:
-            break  # no more pages
+            # some variants use an <a> for the next control
+            try:
+                next_btn = driver.find_element(By.CSS_SELECTOR, "a.next-pagination-item.next, a.next-btn.next-pagination-item.next")
+            except NoSuchElementException:
+                break
 
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
@@ -451,7 +488,7 @@ def write_reviews_to_csv(csv_path: str, rows: List[Dict], header: List[str], app
 
 def scrape_range(start_page: int = 1, end_page: int = 102, out_csv: str = "daraz_reviews.csv"):
     driver = create_logged_in_firefox()
-    driver.set_page_load_timeout(90)
+    driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
 
     headers = [
         "Reviewer username or name",
